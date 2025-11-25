@@ -111,7 +111,7 @@ python tools/psnr_eval.py \
 - **目录为空或格式不支持**：Producer 仅处理 `.jpg` / `.jpeg` / `.png`，其他格式会被忽略。
 - **权限问题**：日志目录、输出目录均会在当前工作目录创建，确保具有写权限。
 
-## 7. 二次开发指引
+## 8. 二次开发指引
 
 - 若需要切换到视频流或摄像头输入，可在 `source/producer` 中扩展新的 Producer 类型，保持输出 `ImagePackage` 即可。
 - 如果希望在结果中叠加额外信息，可在 `tasks/res_sender` 中修改后处理逻辑，返回新的 `ImagePackage` 或自定义数据类型。
