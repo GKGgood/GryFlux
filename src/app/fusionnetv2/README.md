@@ -54,7 +54,20 @@ cmake --build . --target realesrgan_stream -j$(nproc)
 3. 按文件顺序处理输入目录中的图像，每张图像对应一次超分结果。
 4. 将最终的 BGR 图片按输入同名文件写入输出目录（若原始文件名为空则退回 `sr_output_***.png`）。
 
-## 5. PSNR 评估工具
+## 5. 推理性能对比
+
+每次运行结束后，`logs/RealESRGANStream-*.log` 会在 “Pipeline Statistics” 区块汇总各任务耗时。依据 2025-11-25 的两份日志，浮点与量化模型的耗时对比如下（均为 10 张 256×256 输入的批量测试）：
+
+| 指标 | 浮点模型 (`realesrgan-x4-256-noquant.rknn`) | 量化模型 (`realesrgan-x4-256.rknn`) |
+| --- | --- | --- |
+| `Total running time` | 51,966.440 ms | 22,524.406 ms |
+| `Average processing time per item` | 5,193.894 ms | 2,250.480 ms |
+| `Task [rkRunner]` 平均耗时 | 5,128.295 ms | 2,203.013 ms |
+| `Processing rate` | 0.19 items/s | 0.44 items/s |
+
+读取方式：运行 `realesrgan_stream` 后在日志末尾查找 “Pipeline Statistics” 小节，其中 `Task [rkRunner]` 即单次 NPU 推理平均耗时，其余指标可衡量管道整体效率。上述结果显示量化模型在相同硬件与输入集下可获得约 2.3× 的推理速度提升。
+
+## 6. PSNR 评估工具
 
 项目提供了 `tools/psnr_eval.py`，用于比较参考高分辨率目录与推理输出目录之间的 PSNR。该脚本支持根据文件名后缀差异进行灵活匹配，示例命令如下：
 
@@ -91,20 +104,7 @@ python tools/psnr_eval.py \
 
 > 注：Real-ESRGAN 以感知质量为优化目标，PSNR 通常低于以 L1/L2 为主的模型，表格数据仅用于不同部署路径的相对对比。
 
-### 推理性能对比
-
-每次运行结束后，`logs/RealESRGANStream-*.log` 会在 “Pipeline Statistics” 区块汇总各任务耗时。依据 2025-11-25 的两份日志，浮点与量化模型的耗时对比如下（均为 10 张 256×256 输入的批量测试）：
-
-| 指标 | 浮点模型 (`realesrgan-x4-256-noquant.rknn`) | 量化模型 (`realesrgan-x4-256.rknn`) |
-| --- | --- | --- |
-| `Total running time` | 51,966.440 ms | 22,524.406 ms |
-| `Average processing time per item` | 5,193.894 ms | 2,250.480 ms |
-| `Task [rkRunner]` 平均耗时 | 5,128.295 ms | 2,203.013 ms |
-| `Processing rate` | 0.19 items/s | 0.44 items/s |
-
-读取方式：运行 `realesrgan_stream` 后在日志末尾查找 “Pipeline Statistics” 小节，其中 `Task [rkRunner]` 即单次 NPU 推理平均耗时，其余指标可衡量管道整体效率。上述结果显示量化模型在相同硬件与输入集下可获得约 2.3× 的推理速度提升。
-
-## 6. 常见问题排查
+## 7. 常见问题排查
 
 - **模型加载失败**：检查路径是否正确，文件是否为 RKNN 模型，目标设备是否部署对应的 Runtime 版本。
 - **推理尺寸不一致**：当前实现假设模型输入固定为 256×256（不再自动缩放或补边）。若使用其它规格模型，请同步修改 `realesrgan_stream.cpp` 中注册任务的宽高参数以及预处理逻辑，或自行重新实现预处理步骤。
