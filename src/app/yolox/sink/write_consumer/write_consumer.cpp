@@ -1,0 +1,40 @@
+#include "write_consumer.h"
+#include "package.h"
+
+namespace GryFlux
+{
+    void WriteConsumer::run()
+    {
+        LOG.info("[WriteConsumer] Consumer started");
+
+        // 只在生产者活跃时处理
+        while (shouldContinue())
+        {
+            std::shared_ptr<DataObject> output;
+
+            if (getData(output))
+            {
+                auto result = std::dynamic_pointer_cast<ImagePackage>(output);
+                if (result)
+                {
+                    processedFrames++;
+                    auto img = result->get_data();
+                    std::string filename = result->get_name();
+                    if (filename.empty()) {
+                        filename = "output_" + std::to_string(processedFrames) + ".jpg";
+                    }
+                    cv::imwrite( outputPath + "/" + filename, img);
+
+                    LOG.info("Frame %d processed", processedFrames);
+                }
+            }
+            else
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+        }
+
+        LOG.info("[TestConsumer] Processed frames: %d", processedFrames);
+        LOG.info("[TestConsumer] Consumer finished");
+    }
+};
