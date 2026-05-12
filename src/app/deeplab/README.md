@@ -33,8 +33,10 @@ make -j8 deeplab
 ## 运行
 
 ```bash
-./deeplab <model_path> <dataset_dir> [output_dir] [--profile]
+./deeplab <model_path> <dataset_dir> [output_dir]
 ```
+
+运行期只保留位置参数。线程数、NPU 实例数和 profiling 默认值统一放在 `src/app/deeplab/deeplab.cpp` 的 `CliOptions` 里。
 
 其中 `dataset_dir` 必须是一个图片目录，目录下直接放待分割图片，不需要子目录分层。例如：
 
@@ -54,9 +56,8 @@ dataset_dir/
 - 每个文件会被当作一张独立图片送入分割流水线
 - 如果目录里混有非图片文件，会被忽略
 - 如果某张图片解码失败，该图片会被跳过，其余图片继续处理
-- 预处理保持旧行为，固定 letterbox 到 `513x513`
+- 预处理对输入直接 resize 到模型尺寸（默认 `513x513`），与 `rknn_model_zoo/examples/deeplabv3` 的 demo 行为对齐
 - 后处理固定按 `21` 类语义分割解释第一个输出张量
 - 输出结果会写入两个子目录（编号顺序与输入排序一致）：
   - `overlay/deeplab_%06d.jpg`：叠加可视化图
   - `mask/deeplab_%06d.png`：类别 mask（VOC 调色板彩色图）
-

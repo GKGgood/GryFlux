@@ -1,0 +1,4 @@
+3rdparty/
+outputs/
+models/
+*.rknn

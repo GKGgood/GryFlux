@@ -5,7 +5,6 @@
 #include <cmath>
 #include <cstring>
 #include <fstream>
-#include <optional>
 #include <stdexcept>
 
 namespace
@@ -14,20 +13,51 @@ constexpr rknn_core_mask kCoreMasks[] = {
     RKNN_NPU_CORE_0,
     RKNN_NPU_CORE_1,
     RKNN_NPU_CORE_2,
+    RKNN_NPU_CORE_AUTO,
     RKNN_NPU_CORE_0_1,
     RKNN_NPU_CORE_0_1_2,
 };
 
-#define RKNN_CHECK(op, msg)                                                                                              \
-    do                                                                                                                   \
-    {                                                                                                                    \
-        const int ret = (op);                                                                                            \
-        if (ret < 0)                                                                                                     \
-        {                                                                                                                \
-            LOG.error("[FusionNpuContext] %s failed with ret=%d", msg, ret);                                             \
-            throw std::runtime_error(msg);                                                                               \
-        }                                                                                                                \
-    } while (0)
+int checkRknnCall(int ret, const char *op)
+{
+    if (ret < 0)
+    {
+        throw std::runtime_error(std::string(op) + " failed, ret=" + std::to_string(ret));
+    }
+    return ret;
+}
+
+std::uint16_t floatToFp16(float value)
+{
+    std::uint32_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(bits));
+
+    const std::uint32_t sign = (bits >> 16) & 0x8000u;
+    std::int32_t exponent = static_cast<std::int32_t>((bits >> 23) & 0xFFu) - 127 + 15;
+    std::uint32_t mantissa = bits & 0x7FFFFFu;
+
+    if (exponent <= 0)
+    {
+        if (exponent < -10)
+        {
+            return static_cast<std::uint16_t>(sign);
+        }
+        mantissa = (mantissa | 0x800000u) >> static_cast<std::uint32_t>(1 - exponent);
+        return static_cast<std::uint16_t>(sign | ((mantissa + 0x1000u) >> 13));
+    }
+
+    if (exponent >= 31)
+    {
+        return static_cast<std::uint16_t>(sign | 0x7C00u);
+    }
+
+    return static_cast<std::uint16_t>(sign | (static_cast<std::uint32_t>(exponent) << 10) | ((mantissa + 0x1000u) >> 13));
+}
+
+float deqntAffineToF32(std::int32_t value, int zeroPoint, float scale)
+{
+    return (static_cast<float>(value) - static_cast<float>(zeroPoint)) * scale;
+}
 } // namespace
 
 FusionNpuContext::FusionNpuContext(int deviceId,
@@ -35,21 +65,16 @@ FusionNpuContext::FusionNpuContext(int deviceId,
                                    int expectedModelWidth,
                                    int expectedModelHeight)
     : deviceId_(deviceId),
-      modelPath_(modelPath),
       expectedModelWidth_(expectedModelWidth),
       expectedModelHeight_(expectedModelHeight)
 {
-    auto modelData = loadModel(modelPath_);
-    int initRet = rknn_init(&ctx_, modelData.first.get(), modelData.second, 0, nullptr);
-    if (initRet < 0)
-    {
-        LOG.error("[FusionNpuContext] rknn_init failed with ret=%d for model=%s", initRet, modelPath_.c_str());
-        throw std::runtime_error("rknn_init");
-    }
+    loadModel(modelPath);
 
-    RKNN_CHECK(rknn_set_core_mask(ctx_, toCoreMask(deviceId_)), "rknn_set_core_mask");
-    prepareTensorAttributes();
-    initialized_ = true;
+    checkRknnCall(rknn_init(&ctx_, modelData_.data(), modelData_.size(), 0, nullptr), "rknn_init");
+    checkRknnCall(rknn_set_core_mask(ctx_, toCoreMask(deviceId_)), "rknn_set_core_mask");
+
+    prepareInputTensors();
+    prepareOutputTensors();
 }
 
 FusionNpuContext::~FusionNpuContext()
@@ -57,50 +82,56 @@ FusionNpuContext::~FusionNpuContext()
     releaseResources();
 }
 
-void FusionNpuContext::run(const cv::Mat &visYF32,
-                           const cv::Mat &infraredF32,
-                           cv::Mat &fusedYF32)
+void FusionNpuContext::setInputs(const cv::Mat &visibleYF32, const cv::Mat &infraredF32)
 {
-    if (!initialized_)
-    {
-        throw std::runtime_error("FusionNpuContext is not initialized");
-    }
-    if (visYF32.empty())
-    {
-        throw std::runtime_error("FusionNpuContext received empty visible Y input");
-    }
-    if (visYF32.type() != CV_32FC1)
-    {
-        throw std::runtime_error("FusionNpuContext expects visible Y as CV_32FC1");
-    }
-    if (visYF32.cols != expectedModelWidth_ || visYF32.rows != expectedModelHeight_)
-    {
-        throw std::runtime_error("Visible Y input size mismatch");
-    }
-    if (inputAttrs_.size() == 2)
-    {
-        if (infraredF32.empty())
-        {
-            throw std::runtime_error("FusionNpuContext requires infrared input for dual-input model");
-        }
-        if (infraredF32.type() != CV_32FC1)
-        {
-            throw std::runtime_error("FusionNpuContext expects infrared input as CV_32FC1");
-        }
-        if (infraredF32.cols != expectedModelWidth_ || infraredF32.rows != expectedModelHeight_)
-        {
-            throw std::runtime_error("Infrared input size mismatch");
-        }
-    }
+    validateInput(visibleYF32, "visible Y");
+    validateInput(infraredF32, "infrared");
 
-    copyInputData(visYF32, 0);
-    if (inputAttrs_.size() > 1)
-    {
-        copyInputData(infraredF32, 1);
-    }
+    releaseOutputs();
+    setInput(0, visibleYF32);
+    setInput(1, infraredF32);
+    checkRknnCall(rknn_inputs_set(ctx_,
+                                  static_cast<std::uint32_t>(inputs_.size()),
+                                  inputs_.data()),
+                  "rknn_inputs_set");
+}
 
-    RKNN_CHECK(rknn_run(ctx_, nullptr), "rknn_run");
-    fusedYF32 = fetchOutputData(0);
+void FusionNpuContext::runInference()
+{
+    checkRknnCall(rknn_run(ctx_, nullptr), "rknn_run");
+    checkRknnCall(rknn_outputs_get(ctx_,
+                                   static_cast<std::uint32_t>(outputs_.size()),
+                                   outputs_.data(),
+                                   nullptr),
+                  "rknn_outputs_get");
+    outputsAcquired_ = true;
+
+    for (std::size_t i = 0; i < outputs_.size(); ++i)
+    {
+        const auto &attr = outputAttrs_[i];
+        int height = 0;
+        int width = 0;
+        resolveSpatial(attr, height, width);
+
+        cv::Mat output(height, width, CV_32FC1);
+        std::memcpy(output.data,
+                    outputs_[i].buf,
+                    static_cast<std::size_t>(attr.n_elems) * sizeof(float));
+        outputCache_[i] = std::move(output);
+    }
+}
+
+cv::Mat FusionNpuContext::getOutput(std::size_t index)
+{
+    if (index >= outputCache_.size())
+    {
+        throw std::out_of_range("FusionNetV2 output index out of range");
+    }
+    if (outputCache_[index].empty())
+    {
+        throw std::runtime_error("FusionNetV2 output is empty");
+    }
+    return outputCache_[index].clone();
 }
 
 rknn_core_mask FusionNpuContext::toCoreMask(int deviceId)
@@ -116,22 +147,10 @@ rknn_core_mask FusionNpuContext::toCoreMask(int deviceId)
     return kCoreMasks[deviceId];
 }
 
-float FusionNpuContext::determineInputScaling(const rknn_tensor_attr &attr)
+float FusionNpuContext::inputScaleForAttr(const rknn_tensor_attr &attr)
 {
-    const bool isFloat = (attr.type == RKNN_TENSOR_FLOAT16 || attr.type == RKNN_TENSOR_FLOAT32);
-    if (!isFloat)
-    {
-        return 1.0f;
-    }
-
-    const bool affineLike = (attr.qnt_type == RKNN_TENSOR_QNT_AFFINE_ASYMMETRIC ||
-                             attr.qnt_type == RKNN_TENSOR_QNT_NONE);
-    if (!affineLike)
-    {
-        return 1.0f;
-    }
-
-    if (attr.qnt_type == RKNN_TENSOR_QNT_AFFINE_ASYMMETRIC &&
+    if (attr.type == RKNN_TENSOR_FLOAT16 &&
+        attr.qnt_type == RKNN_TENSOR_QNT_AFFINE_ASYMMETRIC &&
         std::fabs(attr.scale - 1.0f) < 1e-4f &&
         attr.zp == 0)
     {
@@ -151,101 +170,77 @@ std::size_t FusionNpuContext::tensorTypeSize(rknn_tensor_type type)
         return sizeof(std::uint16_t);
     case RKNN_TENSOR_INT8:
         return sizeof(std::int8_t);
-    case RKNN_TENSOR_UINT8:
-        return sizeof(std::uint8_t);
-    case RKNN_TENSOR_INT16:
-        return sizeof(std::int16_t);
-    case RKNN_TENSOR_UINT16:
-        return sizeof(std::uint16_t);
     default:
-        throw std::runtime_error("Unsupported tensor type");
+        throw std::runtime_error("Unsupported RKNN tensor type");
     }
 }
 
 void FusionNpuContext::resolveSpatial(const rknn_tensor_attr &attr, int &height, int &width)
 {
-    if (attr.n_dims >= 4)
+    if (attr.n_dims != 4)
     {
-        if (attr.fmt == RKNN_TENSOR_NCHW)
-        {
-            height = static_cast<int>(attr.dims[2]);
-            width = static_cast<int>(attr.dims[3]);
-        }
-        else
-        {
-            height = static_cast<int>(attr.dims[1]);
-            width = static_cast<int>(attr.dims[2]);
-        }
+        throw std::runtime_error("FusionNetV2 expects 4D RKNN tensors");
+    }
+
+    if (attr.fmt == RKNN_TENSOR_NCHW)
+    {
+        height = static_cast<int>(attr.dims[2]);
+        width = static_cast<int>(attr.dims[3]);
         return;
     }
 
-    if (attr.n_dims == 3)
-    {
-        if (attr.fmt == RKNN_TENSOR_NCHW)
-        {
-            height = static_cast<int>(attr.dims[1]);
-            width = static_cast<int>(attr.dims[2]);
-        }
-        else
-        {
-            height = static_cast<int>(attr.dims[0]);
-            width = static_cast<int>(attr.dims[1]);
-        }
-        return;
-    }
-
-    if (attr.n_dims == 2)
-    {
-        height = static_cast<int>(attr.dims[0]);
-        width = static_cast<int>(attr.dims[1]);
-    }
+    height = static_cast<int>(attr.dims[1]);
+    width = static_cast<int>(attr.dims[2]);
 }
 
 void FusionNpuContext::dumpTensorAttr(const rknn_tensor_attr &attr)
 {
-    LOG.info("[FusionNpuContext] index=%d name=%s dims=[%d,%d,%d,%d] size=%d type=%s qnt_type=%s zp=%d scale=%f",
+    LOG.info("[FusionNpuContext] index=%d name=%s dims=[%d,%d,%d,%d] n_elems=%u type=%s qnt_type=%s zp=%d scale=%f",
              attr.index,
              attr.name,
              attr.dims[0],
              attr.dims[1],
              attr.dims[2],
              attr.dims[3],
-             attr.size,
+             static_cast<unsigned int>(attr.n_elems),
              get_type_string(attr.type),
              get_qnt_type_string(attr.qnt_type),
              attr.zp,
              attr.scale);
 }
 
-FusionNpuContext::ModelData FusionNpuContext::loadModel(const std::string &path) const
+void FusionNpuContext::loadModel(const std::string &path)
 {
-    std::ifstream fin(path, std::ios::binary | std::ios::ate);
-    if (!fin.is_open())
+    std::ifstream modelStream(path, std::ios::binary);
+    if (!modelStream)
     {
         throw std::runtime_error("Failed to open RKNN model: " + path);
     }
 
-    const auto fileSize = static_cast<std::size_t>(fin.tellg());
-    fin.seekg(0, std::ios::beg);
+    modelStream.seekg(0, std::ios::end);
+    const auto length = modelStream.tellg();
+    if (length <= 0)
+    {
+        throw std::runtime_error("Empty RKNN model: " + path);
+    }
 
-    auto buffer = std::make_unique<unsigned char[]>(fileSize);
-    fin.read(reinterpret_cast<char *>(buffer.get()), static_cast<std::streamsize>(fileSize));
-    if (!fin)
+    modelStream.seekg(0, std::ios::beg);
+    modelData_.resize(static_cast<std::size_t>(length));
+    modelStream.read(reinterpret_cast<char *>(modelData_.data()), static_cast<std::streamsize>(length));
+    if (!modelStream)
     {
         throw std::runtime_error("Failed to read RKNN model: " + path);
     }
-
-    return ModelData{std::move(buffer), fileSize};
 }
 
-void FusionNpuContext::prepareTensorAttributes()
+void FusionNpuContext::prepareInputTensors()
 {
     rknn_input_output_num ioNum{};
-    RKNN_CHECK(rknn_query(ctx_, RKNN_QUERY_IN_OUT_NUM, &ioNum, sizeof(ioNum)), "rknn_query_in_out_num");
+    checkRknnCall(rknn_query(ctx_, RKNN_QUERY_IN_OUT_NUM, &ioNum, sizeof(ioNum)), "rknn_query(io_num)");
 
-    if (ioNum.n_input != 1 && ioNum.n_input != 2)
+    if (ioNum.n_input != 2)
     {
-        throw std::runtime_error("FusionNetV2 only supports 1 or 2 model inputs");
+        throw std::runtime_error("FusionNetV2 only supports dual-input RKNN models");
     }
     if (ioNum.n_output < 1)
     {
@@ -253,231 +248,150 @@ void FusionNpuContext::prepareTensorAttributes()
     }
 
     inputAttrs_.resize(ioNum.n_input);
-    inputScaling_.clear();
-    inputMems_.clear();
-    inputMems_.reserve(ioNum.n_input);
+    inputs_.resize(ioNum.n_input);
+    inputBuffers_.resize(ioNum.n_input);
+    inputScaling_.resize(ioNum.n_input, 1.0f);
 
     for (std::size_t i = 0; i < inputAttrs_.size(); ++i)
     {
         auto &attr = inputAttrs_[i];
         std::memset(&attr, 0, sizeof(attr));
-        attr.index = static_cast<uint32_t>(i);
-        RKNN_CHECK(rknn_query(ctx_, RKNN_QUERY_INPUT_ATTR, &attr, sizeof(attr)), "rknn_query_input_attr");
+        attr.index = static_cast<std::uint32_t>(i);
+        checkRknnCall(rknn_query(ctx_, RKNN_QUERY_INPUT_ATTR, &attr, sizeof(attr)), "rknn_query(input_attr)");
         dumpTensorAttr(attr);
+
+        if (attr.type != RKNN_TENSOR_INT8 && attr.type != RKNN_TENSOR_FLOAT16)
+        {
+            throw std::runtime_error("FusionNetV2 input tensor type must be int8 or fp16");
+        }
 
         int height = 0;
         int width = 0;
         resolveSpatial(attr, height, width);
-        if (height != expectedModelHeight_ || width != expectedModelWidth_)
+        if (i == 0)
         {
-            throw std::runtime_error("FusionNetV2 model input shape mismatch");
+            modelHeight_ = height;
+            modelWidth_ = width;
+        }
+        else if (height != modelHeight_ || width != modelWidth_)
+        {
+            throw std::runtime_error("FusionNetV2 inputs must share the same spatial shape");
         }
 
-        inputScaling_.push_back(determineInputScaling(attr));
-
-        auto *tensorMem = rknn_create_mem(ctx_, attr.size);
-        if (!tensorMem)
+        if ((expectedModelWidth_ > 0 && width != expectedModelWidth_) ||
+            (expectedModelHeight_ > 0 && height != expectedModelHeight_))
         {
-            throw std::runtime_error("Failed to allocate RKNN input tensor memory");
+            throw std::runtime_error("FusionNetV2 input shape mismatch");
         }
 
-        inputMems_.push_back(tensorMem);
-        RKNN_CHECK(rknn_set_io_mem(ctx_, tensorMem, &attr), "rknn_set_input_mem");
+        inputScaling_[i] = inputScaleForAttr(attr);
+        auto &input = inputs_[i];
+        std::memset(&input, 0, sizeof(input));
+        input.index = static_cast<std::uint32_t>(i);
+        input.type = RKNN_TENSOR_FLOAT32;
+        input.fmt = attr.fmt;
+        input.pass_through = 0;
     }
+}
+
+void FusionNpuContext::prepareOutputTensors()
+{
+    rknn_input_output_num ioNum{};
+    checkRknnCall(rknn_query(ctx_, RKNN_QUERY_IN_OUT_NUM, &ioNum, sizeof(ioNum)), "rknn_query(io_num)");
 
     outputAttrs_.resize(ioNum.n_output);
-    outputMems_.clear();
-    outputMems_.reserve(ioNum.n_output);
+    outputs_.resize(ioNum.n_output);
+    outputCache_.resize(ioNum.n_output);
 
     for (std::size_t i = 0; i < outputAttrs_.size(); ++i)
     {
         auto &attr = outputAttrs_[i];
         std::memset(&attr, 0, sizeof(attr));
-        attr.index = static_cast<uint32_t>(i);
-        RKNN_CHECK(rknn_query(ctx_, RKNN_QUERY_OUTPUT_ATTR, &attr, sizeof(attr)), "rknn_query_output_attr");
+        attr.index = static_cast<std::uint32_t>(i);
+        checkRknnCall(rknn_query(ctx_, RKNN_QUERY_OUTPUT_ATTR, &attr, sizeof(attr)), "rknn_query(output_attr)");
         dumpTensorAttr(attr);
 
-        if (attr.type == RKNN_TENSOR_FLOAT16)
-        {
-            attr.type = RKNN_TENSOR_FLOAT32;
-        }
+        auto &output = outputs_[i];
+        std::memset(&output, 0, sizeof(output));
+        output.want_float = 1;
+        output.is_prealloc = 0;
+    }
+}
 
-        const std::size_t bytes = static_cast<std::size_t>(attr.n_elems) * tensorTypeSize(attr.type);
-        auto *tensorMem = rknn_create_mem(ctx_, bytes);
-        if (!tensorMem)
-        {
-            throw std::runtime_error("Failed to allocate RKNN output tensor memory");
-        }
+void FusionNpuContext::releaseOutputs()
+{
+    if (!outputsAcquired_)
+    {
+        return;
+    }
 
-        outputMems_.push_back(tensorMem);
-        RKNN_CHECK(rknn_set_io_mem(ctx_, tensorMem, &attr), "rknn_set_output_mem");
+    rknn_outputs_release(ctx_,
+                         static_cast<std::uint32_t>(outputs_.size()),
+                         outputs_.data());
+    outputsAcquired_ = false;
+
+    for (auto &output : outputCache_)
+    {
+        output.release();
     }
 }
 
 void FusionNpuContext::releaseResources()
 {
-    for (auto *mem : inputMems_)
-    {
-        if (mem)
-        {
-            rknn_destroy_mem(ctx_, mem);
-        }
-    }
-    inputMems_.clear();
-
-    for (auto *mem : outputMems_)
-    {
-        if (mem)
-        {
-            rknn_destroy_mem(ctx_, mem);
-        }
-    }
-    outputMems_.clear();
-
-    if (initialized_)
+    releaseOutputs();
+    if (ctx_ != 0)
     {
         rknn_destroy(ctx_);
-        initialized_ = false;
+        ctx_ = 0;
     }
 }
 
-void FusionNpuContext::copyInputData(const cv::Mat &mat, std::size_t index)
+void FusionNpuContext::validateInput(const cv::Mat &mat, const char *name) const
 {
-    if (index >= inputAttrs_.size() || index >= inputMems_.size())
+    if (mat.empty())
     {
-        throw std::out_of_range("RKNN input index out of range");
+        throw std::runtime_error(std::string("FusionNetV2 received empty ") + name + " input");
     }
-
-    auto &attr = inputAttrs_[index];
-    auto *tensorMem = inputMems_[index];
-
-    cv::Mat floatMat;
     if (mat.type() != CV_32FC1)
     {
-        mat.convertTo(floatMat, CV_32FC1);
+        throw std::runtime_error(std::string("FusionNetV2 expects ") + name + " as CV_32FC1");
     }
-    else
+    if (mat.cols != modelWidth_ || mat.rows != modelHeight_)
     {
-        floatMat = mat;
+        throw std::runtime_error(std::string("FusionNetV2 ") + name + " input size mismatch");
     }
-
-    if (!floatMat.isContinuous())
-    {
-        floatMat = floatMat.clone();
-    }
-
-    if (index < inputScaling_.size())
-    {
-        const float scaling = inputScaling_[index];
-        if (std::fabs(scaling - 1.0f) > 1e-6f)
-        {
-            floatMat *= scaling;
-        }
-    }
-
-    if (static_cast<std::size_t>(floatMat.total()) != attr.n_elems)
-    {
-        throw std::runtime_error("RKNN input element count mismatch");
-    }
-
-    const float *src = floatMat.ptr<float>();
-    switch (attr.type)
-    {
-    case RKNN_TENSOR_FLOAT32:
-        std::memcpy(tensorMem->virt_addr, src, static_cast<std::size_t>(attr.n_elems) * sizeof(float));
-        break;
-    case RKNN_TENSOR_FLOAT16:
-    {
-        cv::Mat halfMat;
-        floatMat.convertTo(halfMat, CV_16FC1);
-        if (!halfMat.isContinuous())
-        {
-            halfMat = halfMat.clone();
-        }
-        std::memcpy(tensorMem->virt_addr,
-                    halfMat.ptr<std::uint16_t>(),
-                    static_cast<std::size_t>(attr.n_elems) * sizeof(std::uint16_t));
-        break;
-    }
-    case RKNN_TENSOR_INT8:
-    {
-        auto *dst = reinterpret_cast<std::int8_t *>(tensorMem->virt_addr);
-        const float scale = (attr.scale == 0.0f) ? 1.0f : attr.scale;
-        for (std::size_t i = 0; i < attr.n_elems; ++i)
-        {
-            const float quant = std::round(src[i] / scale) + static_cast<float>(attr.zp);
-            dst[i] = static_cast<std::int8_t>(clampValue<int>(static_cast<int>(quant), -128, 127));
-        }
-        break;
-    }
-    case RKNN_TENSOR_UINT8:
-    {
-        auto *dst = reinterpret_cast<std::uint8_t *>(tensorMem->virt_addr);
-        const float scale = (attr.scale == 0.0f) ? 1.0f : attr.scale;
-        for (std::size_t i = 0; i < attr.n_elems; ++i)
-        {
-            const float quant = std::round(src[i] / scale) + static_cast<float>(attr.zp);
-            dst[i] = static_cast<std::uint8_t>(clampValue<int>(static_cast<int>(quant), 0, 255));
-        }
-        break;
-    }
-    default:
-        throw std::runtime_error("Unsupported RKNN input tensor type");
-    }
-
-    RKNN_CHECK(rknn_mem_sync(ctx_, tensorMem, RKNN_MEMORY_SYNC_TO_DEVICE), "rknn_mem_sync_input");
 }
 
-cv::Mat FusionNpuContext::fetchOutputData(std::size_t index)
+void FusionNpuContext::setInput(std::size_t index, const cv::Mat &mat)
 {
-    if (index >= outputAttrs_.size() || index >= outputMems_.size())
+    if (index >= inputAttrs_.size() || index >= inputs_.size() || index >= inputBuffers_.size())
     {
-        throw std::out_of_range("RKNN output index out of range");
+        throw std::out_of_range("FusionNetV2 input index out of range");
     }
 
-    auto &attr = outputAttrs_[index];
-    auto *tensorMem = outputMems_[index];
-    RKNN_CHECK(rknn_mem_sync(ctx_, tensorMem, RKNN_MEMORY_SYNC_FROM_DEVICE), "rknn_mem_sync_output");
+    const auto &attr = inputAttrs_[index];
+    auto &input = inputs_[index];
+    auto &buffer = inputBuffers_[index];
 
-    int height = 0;
-    int width = 0;
-    resolveSpatial(attr, height, width);
-    if (height <= 0 || width <= 0)
+    cv::Mat scaledMat = mat;
+    if (!scaledMat.isContinuous())
     {
-        throw std::runtime_error("Invalid RKNN output tensor shape");
+        scaledMat = scaledMat.clone();
     }
 
-    cv::Mat result(height, width, CV_32FC1);
-    float *dst = result.ptr<float>();
-
-    switch (attr.type)
+    const float inputScale = inputScaling_[index];
+    if (std::fabs(inputScale - 1.0f) > 1e-6f)
     {
-    case RKNN_TENSOR_FLOAT32:
-        std::memcpy(dst, tensorMem->virt_addr, static_cast<std::size_t>(attr.n_elems) * sizeof(float));
-        break;
-    case RKNN_TENSOR_INT8:
-    {
-        auto *src = reinterpret_cast<std::int8_t *>(tensorMem->virt_addr);
-        const float scale = (attr.scale == 0.0f) ? 1.0f : attr.scale;
-        for (std::size_t i = 0; i < attr.n_elems; ++i)
-        {
-            dst[i] = scale * (static_cast<std::int32_t>(src[i]) - attr.zp);
-        }
-        break;
-    }
-    case RKNN_TENSOR_UINT8:
-    {
-        auto *src = reinterpret_cast<std::uint8_t *>(tensorMem->virt_addr);
-        const float scale = (attr.scale == 0.0f) ? 1.0f : attr.scale;
-        for (std::size_t i = 0; i < attr.n_elems; ++i)
-        {
-            dst[i] = scale * (static_cast<std::int32_t>(src[i]) - attr.zp);
-        }
-        break;
-    }
-    default:
-        throw std::runtime_error("Unsupported RKNN output tensor type");
+        scaledMat *= inputScale;
     }
 
-    return result;
+    if (static_cast<std::size_t>(scaledMat.total()) != attr.n_elems)
+    {
+        throw std::runtime_error("FusionNetV2 input element count mismatch");
+    }
+
+    buffer.resize(static_cast<std::size_t>(attr.n_elems) * sizeof(float));
+    std::memcpy(buffer.data(), scaledMat.ptr<float>(), buffer.size());
+    input.buf = buffer.data();
+    input.size = static_cast<std::uint32_t>(buffer.size());
 }

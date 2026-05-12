@@ -2,20 +2,25 @@
 
 #include "framework/node_base.h"
 
+#include <cstddef>
+
 namespace RealesrganNodes
 {
 
 class PreprocessNode : public GryFlux::NodeBase
 {
 public:
-    explicit PreprocessNode(int modelWidth = 256, int modelHeight = 256)
-        : modelWidth_(modelWidth), modelHeight_(modelHeight) {}
+    explicit PreprocessNode(std::size_t modelWidth, std::size_t modelHeight)
+        : modelWidth_(modelWidth),
+          modelHeight_(modelHeight)
+    {
+    }
 
     void execute(GryFlux::DataPacket &packet, GryFlux::Context &ctx) override;
 
 private:
-    int modelWidth_ = 256;
-    int modelHeight_ = 256;
+    std::size_t modelWidth_;
+    std::size_t modelHeight_;
 };
 
 } // namespace RealesrganNodes

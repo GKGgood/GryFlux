@@ -34,12 +34,12 @@ make -j8 realesrgan
 ## 运行
 
 ```bash
-./realesrgan <model_path> <dataset_dir> [output_dir] \
-  [--profile]
+./realesrgan <model_path> <dataset_dir> [output_dir]
 ```
 
 说明：
 
 - 输入目录仅处理 `.jpg/.jpeg/.png`，按文件名排序。
-- 预处理为固定尺寸校验（默认 256x256），不自动 resize。
+- 预处理会按模型输入尺寸自动 resize。
 - 输出图按输入同名写入输出目录。
+- Pipeline 参数在 `src/app/realesrgan/realesrgan.cpp` 的 `CliOptions` 中统一配置。

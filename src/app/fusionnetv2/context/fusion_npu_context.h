@@ -5,12 +5,9 @@
 #include <opencv2/core.hpp>
 #include <rknn_api.h>
 
-#include <algorithm>
 #include <cstddef>
 #include <cstdint>
-#include <memory>
 #include <string>
-#include <utility>
 #include <vector>
 
 class FusionNpuContext : public GryFlux::Context
@@ -18,46 +15,47 @@ class FusionNpuContext : public GryFlux::Context
 public:
     explicit FusionNpuContext(int deviceId,
                               const std::string &modelPath,
-                              int expectedModelWidth,
-                              int expectedModelHeight);
+                              int expectedModelWidth = 0,
+                              int expectedModelHeight = 0);
     ~FusionNpuContext() override;
 
-    void run(const cv::Mat &visYF32,
-             const cv::Mat &infraredF32,
-             cv::Mat &fusedYF32);
+    int getModelWidth() const { return modelWidth_; }
+    int getModelHeight() const { return modelHeight_; }
+    std::size_t getOutputCount() const { return outputAttrs_.size(); }
+
+    void setInputs(const cv::Mat &visibleYF32, const cv::Mat &infraredF32);
+    void runInference();
+    cv::Mat getOutput(std::size_t index);
 
 private:
-    using ModelData = std::pair<std::unique_ptr<unsigned char[]>, std::size_t>;
-
     static rknn_core_mask toCoreMask(int deviceId);
-    static float determineInputScaling(const rknn_tensor_attr &attr);
+    static float inputScaleForAttr(const rknn_tensor_attr &attr);
     static std::size_t tensorTypeSize(rknn_tensor_type type);
     static void resolveSpatial(const rknn_tensor_attr &attr, int &height, int &width);
-
-    template<typename T>
-    static T clampValue(T value, T minValue, T maxValue)
-    {
-        return std::max(minValue, std::min(maxValue, value));
-    }
-
     static void dumpTensorAttr(const rknn_tensor_attr &attr);
 
-    ModelData loadModel(const std::string &path) const;
-    void prepareTensorAttributes();
+    void loadModel(const std::string &path);
+    void prepareInputTensors();
+    void prepareOutputTensors();
+    void releaseOutputs();
     void releaseResources();
-    void copyInputData(const cv::Mat &mat, std::size_t index);
-    cv::Mat fetchOutputData(std::size_t index);
+    void validateInput(const cv::Mat &mat, const char *name) const;
+    void setInput(std::size_t index, const cv::Mat &mat);
 
     int deviceId_ = 0;
-    std::string modelPath_;
-    int expectedModelWidth_ = 640;
-    int expectedModelHeight_ = 480;
+    int expectedModelWidth_ = 0;
+    int expectedModelHeight_ = 0;
+    int modelWidth_ = 0;
+    int modelHeight_ = 0;
 
     rknn_context ctx_ = 0;
+    std::vector<std::uint8_t> modelData_;
     std::vector<rknn_tensor_attr> inputAttrs_;
+    std::vector<rknn_input> inputs_;
+    std::vector<std::vector<std::uint8_t>> inputBuffers_;
     std::vector<rknn_tensor_attr> outputAttrs_;
-    std::vector<rknn_tensor_mem *> inputMems_;
-    std::vector<rknn_tensor_mem *> outputMems_;
+    std::vector<rknn_output> outputs_;
+    std::vector<cv::Mat> outputCache_;
     std::vector<float> inputScaling_;
-    bool initialized_ = false;
+    bool outputsAcquired_ = false;
 };

@@ -42,7 +42,7 @@ std::unique_ptr<GryFlux::DataPacket> ImageDirSource::produce()
     {
         const auto filePath = imageFiles_[cursor_++];
 
-        cv::Mat img = cv::imread(filePath.string(), cv::IMREAD_UNCHANGED);
+        cv::Mat img = cv::imread(filePath.string(), cv::IMREAD_COLOR);
         if (img.empty())
         {
             LOG.warning("Failed to read image, skip: %s", filePath.string().c_str());

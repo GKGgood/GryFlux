@@ -5,25 +5,30 @@
 #include "framework/template_builder.h"
 #include "utils/logger.h"
 
+#include "app/common/rknn_context.h"
 #include "consumer/result_consumer.h"
-#include "context/deeplab_npu_context.h"
 #include "nodes/deeplab_nodes.h"
 #include "source/image_dir_source.h"
 
 #include <chrono>
-#include <cstring>
 #include <memory>
+#include <stdexcept>
 #include <string>
-#include <vector>
 
 namespace
 {
+struct CliOptions
+{
+    std::size_t npuInstances = 3;
+    std::size_t threadPoolSize = 8;
+    std::size_t maxActivePackets = 8;
+    bool enableProfiling = true;
+};
+
 void printHelp()
 {
-    LOG.info("Usage: deeplab <model_path> <dataset_dir> [output_dir] [options]");
-    LOG.info("Options:");
-    LOG.info("  --profile            Enable GryFlux profiling");
-    LOG.info("  --help,-h            Show help and exit");
+    LOG.info("Usage: deeplab <model_path> <dataset_dir> [output_dir]");
+    LOG.info("Pipeline config is defined in CliOptions in src/app/deeplab/deeplab.cpp");
 }
 } // namespace
 
@@ -33,13 +38,7 @@ int main(int argc, char **argv)
     LOG.setOutputType(GryFlux::LogOutputType::CONSOLE);
     LOG.setAppName("deeplab");
 
-    if (argc >= 2 && (!std::strcmp(argv[1], "--help") || !std::strcmp(argv[1], "-h")))
-    {
-        printHelp();
-        return 0;
-    }
-
-    if (argc < 3)
+    if (argc < 3 || argc > 4)
     {
         printHelp();
         return -1;
@@ -47,39 +46,8 @@ int main(int argc, char **argv)
 
     const std::string modelPath = argv[1];
     const std::string datasetDir = argv[2];
-
-    std::string outputDir = "./outputs";
-    int argIndex = 3;
-    if (argIndex < argc && std::strncmp(argv[argIndex], "--", 2) != 0)
-    {
-        outputDir = argv[argIndex];
-        ++argIndex;
-    }
-
-    bool enableProfiling = false;
-    for (int i = argIndex; i < argc; ++i)
-    {
-        if (!std::strcmp(argv[i], "--help") || !std::strcmp(argv[i], "-h"))
-        {
-            printHelp();
-            return 0;
-        }
-        if (!std::strcmp(argv[i], "--profile"))
-        {
-            enableProfiling = true;
-            continue;
-        }
-
-        LOG.error("Unsupported option: %s", argv[i]);
-        printHelp();
-        return -1;
-    }
-
-    constexpr int kModelWidth = 513;
-    constexpr int kModelHeight = 513;
-    constexpr size_t kNpuInstances = 3;
-    constexpr size_t kThreadPoolSize = 8;
-    constexpr size_t kMaxActivePackets = 8;
+    const std::string outputDir = (argc == 4) ? argv[3] : "./outputs";
+    const CliOptions options{};
 
     try
     {
@@ -91,16 +59,20 @@ int main(int argc, char **argv)
         LOG.info("========================================");
 
         auto resourcePool = std::make_shared<GryFlux::ResourcePool>();
+        auto probeContext = std::make_shared<RKNNContext>(0, modelPath);
+        const int modelWidth = probeContext->getModelWidth();
+        const int modelHeight = probeContext->getModelHeight();
         {
             std::vector<std::shared_ptr<GryFlux::Context>> npuContexts;
-            npuContexts.reserve(kNpuInstances);
-            for (size_t i = 0; i < kNpuInstances; ++i)
+            npuContexts.reserve(options.npuInstances);
+            npuContexts.push_back(probeContext);
+            for (std::size_t i = 1; i < options.npuInstances; ++i)
             {
-                npuContexts.push_back(std::make_shared<DeeplabNpuContext>(
+                npuContexts.push_back(std::make_shared<RKNNContext>(
                     static_cast<int>(i),
                     modelPath,
-                    kModelWidth,
-                    kModelHeight));
+                    modelWidth,
+                    modelHeight));
             }
             resourcePool->registerResourceType("npu", std::move(npuContexts));
         }
@@ -109,7 +81,7 @@ int main(int argc, char **argv)
             [&](GryFlux::TemplateBuilder *builder)
             {
                 builder->setInputNode<DeeplabNodes::InputNode>("input");
-                builder->addTask<DeeplabNodes::PreprocessNode>("preprocess", "", {"input"}, kModelWidth, kModelHeight);
+                builder->addTask<DeeplabNodes::PreprocessNode>("preprocess", "", {"input"}, modelWidth, modelHeight);
                 builder->addTask<DeeplabNodes::InferenceNode>("inference", "npu", {"preprocess"});
                 builder->addTask<DeeplabNodes::PostprocessNode>("postprocess", "", {"inference"});
                 builder->setOutputNode<DeeplabNodes::OutputNode>("output", {"postprocess"});
@@ -123,10 +95,10 @@ int main(int argc, char **argv)
             graphTemplate,
             resourcePool,
             consumer,
-            kThreadPoolSize,
-            kMaxActivePackets);
+            options.threadPoolSize,
+            options.maxActivePackets);
 
-        if (enableProfiling)
+        if (options.enableProfiling)
         {
             if constexpr (GryFlux::Profiling::kBuildProfiling)
             {
@@ -156,12 +128,12 @@ int main(int argc, char **argv)
                  throughput);
         LOG.info("========================================");
 
-        if (enableProfiling)
+        if (options.enableProfiling)
         {
             if constexpr (GryFlux::Profiling::kBuildProfiling)
             {
                 pipeline.printProfilingStats();
-                const std::string timelinePath = "graph_timeline.json";
+                const std::string timelinePath = "deeplab_graph_timeline.json";
                 pipeline.dumpProfilingTimeline(timelinePath);
                 LOG.info("Graph timeline dumped to %s", timelinePath.c_str());
             }

@@ -22,11 +22,9 @@ public:
 
     void consume(std::unique_ptr<GryFlux::DataPacket> packet) override;
 
-    size_t getConsumedCount() const { return consumedCount_.load(std::memory_order_relaxed); }
-    size_t getWrittenCount() const { return writtenCount_.load(std::memory_order_relaxed); }
+    std::size_t getWrittenCount() const { return writtenCount_.load(std::memory_order_relaxed); }
 
 private:
     fs::path outputDir_;
-    std::atomic<size_t> consumedCount_{0};
-    std::atomic<size_t> writtenCount_{0};
+    std::atomic<std::size_t> writtenCount_{0};
 };

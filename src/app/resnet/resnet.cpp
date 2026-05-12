@@ -5,16 +5,13 @@
 #include "framework/template_builder.h"
 #include "utils/logger.h"
 
+#include "app/common/rknn_context.h"
 #include "consumer/result_consumer.h"
-#include "context/resnet_npu_context.h"
 #include "nodes/resnet_nodes.h"
 #include "source/image_dir_source.h"
 
 #include <chrono>
-#include <cstdlib>
-#include <cstring>
 #include <fstream>
-#include <iostream>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -22,68 +19,19 @@
 
 namespace
 {
-struct AppConfig
+struct CliOptions
 {
-    std::string modelPath;
-    std::string datasetDir;
-    std::string synsetPath;
-    std::string outputDir = "./outputs";
-    bool enableProfiling = false;
+    std::size_t topK = 5;
+    std::size_t npuInstances = 3;
+    std::size_t threadPoolSize = 8;
+    std::size_t maxActivePackets = 8;
+    bool enableProfiling = true;
 };
 
 void printHelp()
 {
-    std::cout << "Usage: resnet <model_path> <dataset_dir> <synset_path> [output_dir] [options]\n";
-    std::cout << "Options:\n";
-    std::cout << "  --profile            Enable GryFlux profiling\n";
-    std::cout << "  --help,-h            Show help and exit\n";
-}
-
-void initLogger()
-{
-    LOG.setLevel(GryFlux::LogLevel::INFO);
-    LOG.setOutputType(GryFlux::LogOutputType::CONSOLE);
-    LOG.setAppName("resnet");
-}
-
-AppConfig parseArgs(int argc, char **argv)
-{
-    if (argc < 4)
-    {
-        throw std::runtime_error("Not enough arguments");
-    }
-
-    AppConfig config;
-    config.modelPath = argv[1];
-    config.datasetDir = argv[2];
-    config.synsetPath = argv[3];
-
-    int argIndex = 4;
-    if (argIndex < argc && std::strncmp(argv[argIndex], "--", 2) != 0)
-    {
-        config.outputDir = argv[argIndex];
-        ++argIndex;
-    }
-
-    while (argIndex < argc)
-    {
-        const char *arg = argv[argIndex];
-        if (!std::strcmp(arg, "--help") || !std::strcmp(arg, "-h"))
-        {
-            printHelp();
-            std::exit(0);
-        }
-        if (!std::strcmp(arg, "--profile"))
-        {
-            config.enableProfiling = true;
-            ++argIndex;
-            continue;
-        }
-
-        throw std::runtime_error(std::string("Unsupported option: ") + arg);
-    }
-
-    return config;
+    LOG.info("Usage: resnet <model_path> <dataset_dir> <synset_path> [output_dir]");
+    LOG.info("Pipeline config is defined in CliOptions in src/app/resnet/resnet.cpp");
 }
 
 std::vector<std::string> loadLabels(const std::string &synsetPath)
@@ -114,25 +62,25 @@ std::vector<std::string> loadLabels(const std::string &synsetPath)
 
 int main(int argc, char **argv)
 {
-    if (argc >= 2 && (!std::strcmp(argv[1], "--help") || !std::strcmp(argv[1], "-h")))
+    LOG.setLevel(GryFlux::LogLevel::INFO);
+    LOG.setOutputType(GryFlux::LogOutputType::CONSOLE);
+    LOG.setAppName("resnet");
+
+    if (argc < 4 || argc > 5)
     {
         printHelp();
-        return 0;
+        return -1;
     }
-
-    initLogger();
-
-    constexpr int kModelWidth = 224;
-    constexpr int kModelHeight = 224;
-    constexpr std::size_t kTopK = 5;
-    constexpr int kNpuInstances = 3;
-    constexpr std::size_t kThreadPoolSize = 8;
-    constexpr std::size_t kMaxActivePackets = 8;
 
     try
     {
-        const AppConfig config = parseArgs(argc, argv);
-        const auto classLabels = loadLabels(config.synsetPath);
+        const std::string modelPath = argv[1];
+        const std::string datasetDir = argv[2];
+        const std::string synsetPath = argv[3];
+        const std::string outputDir = (argc == 5) ? argv[4] : "./outputs";
+        const CliOptions options{};
+
+        const auto classLabels = loadLabels(synsetPath);
         if (classLabels.empty())
         {
             LOG.warning("Synset file is empty, fallback labels will use class_<id>");
@@ -140,23 +88,27 @@ int main(int argc, char **argv)
 
         LOG.info("========================================");
         LOG.info("GryFlux ResNet Pipeline");
-        LOG.info("Model : %s", config.modelPath.c_str());
-        LOG.info("Input : %s", config.datasetDir.c_str());
-        LOG.info("Synset: %s", config.synsetPath.c_str());
-        LOG.info("Output: %s", config.outputDir.c_str());
+        LOG.info("Model : %s", modelPath.c_str());
+        LOG.info("Input : %s", datasetDir.c_str());
+        LOG.info("Synset: %s", synsetPath.c_str());
+        LOG.info("Output: %s", outputDir.c_str());
         LOG.info("========================================");
 
         auto resourcePool = std::make_shared<GryFlux::ResourcePool>();
+        auto probeContext = std::make_shared<RKNNContext>(0, modelPath);
+        const int modelWidth = probeContext->getModelWidth();
+        const int modelHeight = probeContext->getModelHeight();
         {
             std::vector<std::shared_ptr<GryFlux::Context>> npuContexts;
-            npuContexts.reserve(static_cast<std::size_t>(kNpuInstances));
-            for (int i = 0; i < kNpuInstances; ++i)
+            npuContexts.reserve(options.npuInstances);
+            npuContexts.push_back(probeContext);
+            for (std::size_t i = 1; i < options.npuInstances; ++i)
             {
-                npuContexts.push_back(std::make_shared<ResnetNpuContext>(
-                    i,
-                    config.modelPath,
-                    kModelWidth,
-                    kModelHeight));
+                npuContexts.push_back(std::make_shared<RKNNContext>(
+                    static_cast<int>(i),
+                    modelPath,
+                    modelWidth,
+                    modelHeight));
             }
             resourcePool->registerResourceType("npu", std::move(npuContexts));
         }
@@ -165,29 +117,29 @@ int main(int argc, char **argv)
             [&](GryFlux::TemplateBuilder *builder)
             {
                 builder->setInputNode<ResnetNodes::InputNode>("input");
-                builder->addTask<ResnetNodes::PreprocessNode>("preprocess", "", {"input"}, kModelWidth, kModelHeight);
+                builder->addTask<ResnetNodes::PreprocessNode>("preprocess", "", {"input"}, modelWidth, modelHeight);
                 builder->addTask<ResnetNodes::InferenceNode>("inference", "npu", {"preprocess"});
                 builder->addTask<ResnetNodes::PostprocessNode>(
                     "postprocess",
                     "",
                     {"inference"},
                     classLabels,
-                    kTopK);
+                    options.topK);
                 builder->setOutputNode<ResnetNodes::OutputNode>("output", {"postprocess"});
             });
 
-        auto source = std::make_shared<ResnetImageDirSource>(config.datasetDir);
-        auto consumer = std::make_shared<ResnetResultConsumer>(config.outputDir);
+        auto source = std::make_shared<ResnetImageDirSource>(datasetDir);
+        auto consumer = std::make_shared<ResnetResultConsumer>(outputDir);
 
         GryFlux::AsyncPipeline pipeline(
             source,
             graphTemplate,
             resourcePool,
             consumer,
-            kThreadPoolSize,
-            kMaxActivePackets);
+            options.threadPoolSize,
+            options.maxActivePackets);
 
-        if (config.enableProfiling)
+        if (options.enableProfiling)
         {
             if constexpr (GryFlux::Profiling::kBuildProfiling)
             {
@@ -217,7 +169,7 @@ int main(int argc, char **argv)
                  throughput);
         LOG.info("========================================");
 
-        if (config.enableProfiling)
+        if (options.enableProfiling)
         {
             if constexpr (GryFlux::Profiling::kBuildProfiling)
             {
@@ -231,7 +183,6 @@ int main(int argc, char **argv)
     catch (const std::exception &e)
     {
         LOG.error("Fatal error: %s", e.what());
-        printHelp();
         return -1;
     }
 

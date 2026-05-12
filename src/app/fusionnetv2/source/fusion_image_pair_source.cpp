@@ -1,5 +1,4 @@
 #include "source/fusion_image_pair_source.h"
-
 #include "packet/fusionnetv2_packet.h"
 #include "utils/logger.h"
 

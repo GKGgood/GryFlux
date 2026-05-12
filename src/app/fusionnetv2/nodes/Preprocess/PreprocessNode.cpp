@@ -22,7 +22,7 @@ void PreprocessNode::execute(GryFlux::DataPacket &packet, GryFlux::Context &ctx)
 
     p.originalVisibleSize = p.visibleBgrU8.size();
 
-    const cv::Size targetSize(modelWidth_, modelHeight_);
+    const cv::Size targetSize(static_cast<int>(modelWidth_), static_cast<int>(modelHeight_));
 
     cv::Mat visibleResized;
     if (p.visibleBgrU8.size() != targetSize)
@@ -49,11 +49,6 @@ void PreprocessNode::execute(GryFlux::DataPacket &packet, GryFlux::Context &ctx)
 
     std::vector<cv::Mat> channels;
     cv::split(yCrCb, channels);
-    if (channels.size() != 3)
-    {
-        throw std::runtime_error("PreprocessNode expected 3 YCrCb channels");
-    }
-
     channels[0].convertTo(p.visYF32, CV_32FC1, 1.0f / 255.0f);
     p.visCrU8 = channels[1];
     p.visCbU8 = channels[2];

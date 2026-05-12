@@ -10,7 +10,7 @@
 
 ## 目录说明
 
-- `context/`：ResNet 的 RKNN NPU 资源上下文
+- `src/app/common/rknn_context.*`：共享 RKNN NPU 资源上下文
 - `source/`：图片目录读取器
 - `consumer/`：分类结果写出器
 - `packet/`：流水线数据包定义
@@ -39,8 +39,10 @@ cmake --build build-aarch64 --target resnet -j$(nproc)
 ## 运行方式
 
 ```bash
-./resnet <model_path> <dataset_dir> <synset_path> [output_dir] [options] [--profile]
+./resnet <model_path> <dataset_dir> <synset_path> [output_dir]
 ```
+
+运行期只保留位置参数。线程数、NPU 实例数、Top-K 和 profiling 默认值统一放在 `src/app/resnet/resnet.cpp` 的 `CliOptions` 里。
 
 
 输入目录只扫描当前层级，支持 `.jpg/.jpeg/.png/.bmp`，按文件名排序。

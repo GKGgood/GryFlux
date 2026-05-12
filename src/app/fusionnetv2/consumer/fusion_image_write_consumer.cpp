@@ -26,8 +26,6 @@ void FusionImageWriteConsumer::consume(std::unique_ptr<GryFlux::DataPacket> pack
         return;
     }
 
-    consumedCount_.fetch_add(1, std::memory_order_relaxed);
-
     auto &p = static_cast<FusionNetV2Packet &>(*packet);
     if (p.outputBgrU8.empty())
     {

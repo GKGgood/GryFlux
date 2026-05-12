@@ -35,49 +35,19 @@ void PostprocessNode::execute(GryFlux::DataPacket &packet, GryFlux::Context &ctx
     {
         throw std::runtime_error("Postprocess: invalid Deeplab output tensor");
     }
-    if (output.channels != kClassCount)
+
+
+    cv::Mat mask(static_cast<int>(output.gridH), static_cast<int>(output.gridW), CV_8UC1);
+    for (int y = 0; y < static_cast<int>(output.gridH); ++y)
     {
-        throw std::runtime_error("Postprocess: unexpected Deeplab class count");
-    }
-
-    cv::Mat logits(static_cast<int>(output.gridH),
-                   static_cast<int>(output.gridW),
-                   CV_32FC(kClassCount),
-                   const_cast<float*>(output.data.data()));
-
-    cv::Mat resizedLogits;
-    cv::resize(logits,
-               resizedLogits,
-               cv::Size(static_cast<int>(p.modelWidth), static_cast<int>(p.modelHeight)),
-               0,
-               0,
-               cv::INTER_LINEAR);
-
-    const int cropX = clampInt(p.xPad, 0, resizedLogits.cols - 1);
-    const int cropY = clampInt(p.yPad, 0, resizedLogits.rows - 1);
-    const int expectedCropW = static_cast<int>(p.resizedWidth);
-    const int expectedCropH = static_cast<int>(p.resizedHeight);
-    const int cropW = clampInt(expectedCropW, 1, resizedLogits.cols - cropX);
-    const int cropH = clampInt(expectedCropH, 1, resizedLogits.rows - cropY);
-
-    const cv::Rect roi(cropX, cropY, cropW, cropH);
-    const cv::Mat croppedLogits = resizedLogits(roi);
-    
-    cv::Mat originalSizeLogits;
-    cv::resize(croppedLogits, originalSizeLogits, p.originalImage.size(), 0, 0, cv::INTER_LINEAR);
-
-    p.mask.create(p.originalImage.rows, p.originalImage.cols, CV_8UC1);
-    for (int y = 0; y < p.originalImage.rows; ++y)
-    {
-        const float* rowPtr = originalSizeLogits.ptr<float>(y);
-        uchar* maskPtr = p.mask.ptr<uchar>(y);
-        for (int x = 0; x < p.originalImage.cols; ++x)
+        uchar *maskPtr = mask.ptr<uchar>(y);
+        for (int x = 0; x < static_cast<int>(output.gridW); ++x)
         {
             int bestClass = 0;
-            float bestScore = rowPtr[x * kClassCount];
+            float bestScore = output.data[(y * static_cast<int>(output.gridW) + x) * kClassCount];
             for (int c = 1; c < kClassCount; ++c)
             {
-                float score = rowPtr[x * kClassCount + c];
+                const float score = output.data[(y * static_cast<int>(output.gridW) + x) * kClassCount + c];
                 if (score > bestScore)
                 {
                     bestScore = score;
@@ -87,6 +57,23 @@ void PostprocessNode::execute(GryFlux::DataPacket &packet, GryFlux::Context &ctx
             maskPtr[x] = static_cast<uchar>(bestClass);
         }
     }
+
+    cv::Mat upsampledMask;
+    cv::resize(mask,
+               upsampledMask,
+               cv::Size(static_cast<int>(p.modelWidth), static_cast<int>(p.modelHeight)),
+               0,
+               0,
+               cv::INTER_NEAREST);
+
+    const int cropX = clampInt(p.xPad, 0, upsampledMask.cols);
+    const int cropY = clampInt(p.yPad, 0, upsampledMask.rows);
+    const int cropW = clampInt(static_cast<int>(p.modelWidth) - cropX * 2, 1, upsampledMask.cols - cropX);
+    const int cropH = clampInt(static_cast<int>(p.modelHeight) - cropY * 2, 1, upsampledMask.rows - cropY);
+
+    const cv::Rect roi(cropX, cropY, cropW, cropH);
+    const cv::Mat croppedMask = upsampledMask(roi);
+    cv::resize(croppedMask, p.mask, p.originalImage.size(), 0, 0, cv::INTER_NEAREST);
 }
 
 } // namespace DeeplabNodes

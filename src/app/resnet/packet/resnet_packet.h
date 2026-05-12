@@ -32,17 +32,8 @@ struct ResnetPacket : public GryFlux::DataPacket
     std::vector<std::size_t> sortedIndices;
     std::vector<TopKResult> topK;
 
-    ResnetPacket()
-        : inputData(224 * 224 * 3),
-          logits(1000),
-          sortedIndices(1000)
-    {
-        topK.reserve(5);
-    }
-
     uint64_t getIdx() const override
     {
         return static_cast<uint64_t>(idx);
     }
 };
-

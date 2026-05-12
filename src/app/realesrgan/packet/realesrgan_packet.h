@@ -3,8 +3,11 @@
 #include "framework/data_packet.h"
 
 #include <opencv2/opencv.hpp>
+
+#include <cstddef>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 struct RealesrganPacket : public GryFlux::DataPacket
 {
@@ -12,7 +15,7 @@ struct RealesrganPacket : public GryFlux::DataPacket
     std::string filename;
 
     cv::Mat inputBgrU8;
-    cv::Mat modelRgbU8;
+    std::vector<std::uint8_t> inputTensor;
     cv::Mat srTensorF32;
     cv::Mat outputBgrU8;
 

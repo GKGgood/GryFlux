@@ -2,20 +2,25 @@
 
 #include "framework/node_base.h"
 
+#include <cstddef>
+
 namespace FusionNetV2Nodes
 {
 
 class PreprocessNode : public GryFlux::NodeBase
 {
 public:
-    explicit PreprocessNode(int modelWidth = 640, int modelHeight = 480)
-        : modelWidth_(modelWidth), modelHeight_(modelHeight) {}
+    explicit PreprocessNode(std::size_t modelWidth, std::size_t modelHeight)
+        : modelWidth_(modelWidth),
+          modelHeight_(modelHeight)
+    {
+    }
 
     void execute(GryFlux::DataPacket &packet, GryFlux::Context &ctx) override;
 
 private:
-    int modelWidth_ = 640;
-    int modelHeight_ = 480;
+    std::size_t modelWidth_;
+    std::size_t modelHeight_;
 };
 
 } // namespace FusionNetV2Nodes

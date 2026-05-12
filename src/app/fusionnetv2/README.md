@@ -39,8 +39,10 @@ make -j8 fusionnetv2
 ## 运行
 
 ```bash
-./fusionnetv2 <model_path> <dataset_root> [output_dir] [--profile]
+./fusionnetv2 <model_path> <dataset_root> [output_dir]
 ```
+
+运行期只保留位置参数。线程数、NPU 实例数和 profiling 默认值统一放在 `src/app/fusionnetv2/fusionnetv2.cpp` 的 `CliOptions` 里。
 
 说明：
 

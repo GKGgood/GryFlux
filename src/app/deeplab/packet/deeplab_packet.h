@@ -26,21 +26,16 @@ struct DeeplabPacket : public GryFlux::DataPacket
     cv::Mat preprocessedImage;
     std::vector<uint8_t> inputData;
 
-    std::size_t modelWidth = 513;
-    std::size_t modelHeight = 513;
-    std::size_t resizedWidth = 513;
-    std::size_t resizedHeight = 513;
+    std::size_t modelWidth = 0;
+    std::size_t modelHeight = 0;
+    std::size_t resizedWidth = 0;
+    std::size_t resizedHeight = 0;
     float scale = 1.0f;
     int xPad = 0;
     int yPad = 0;
 
     std::vector<InferenceOutput> inferenceOutputs;
     cv::Mat mask;
-
-    DeeplabPacket()
-        : inputData(513 * 513 * 3)
-    {
-    }
 
     uint64_t getIdx() const override
     {

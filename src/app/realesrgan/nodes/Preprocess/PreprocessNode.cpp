@@ -4,6 +4,7 @@
 
 #include <opencv2/opencv.hpp>
 
+#include <cstring>
 #include <stdexcept>
 
 namespace RealesrganNodes
@@ -19,35 +20,32 @@ void PreprocessNode::execute(GryFlux::DataPacket &packet, GryFlux::Context &ctx)
         throw std::runtime_error("Preprocess: empty input image");
     }
 
-    cv::Mat bgr;
-    switch (p.inputBgrU8.channels())
+    cv::Mat rgb;
+    cv::cvtColor(p.inputBgrU8, rgb, cv::COLOR_BGR2RGB);
+
+    if (p.inputBgrU8.cols == static_cast<int>(modelWidth_) &&
+        p.inputBgrU8.rows == static_cast<int>(modelHeight_))
     {
-    case 1:
-        cv::cvtColor(p.inputBgrU8, bgr, cv::COLOR_GRAY2BGR);
-        break;
-    case 3:
-        bgr = p.inputBgrU8;
-        break;
-    case 4:
-        cv::cvtColor(p.inputBgrU8, bgr, cv::COLOR_BGRA2BGR);
-        break;
-    default:
-        throw std::runtime_error("Preprocess: unsupported channel count");
+        if (!rgb.isContinuous())
+        {
+            rgb = rgb.clone();
+        }
+        p.inputTensor.resize(modelWidth_ * modelHeight_ * 3);
+        std::memcpy(p.inputTensor.data(), rgb.data, p.inputTensor.size());
+        return;
     }
 
-    if (bgr.depth() != CV_8U)
+    cv::Mat resized;
+    cv::resize(rgb,
+               resized,
+               cv::Size(static_cast<int>(modelWidth_), static_cast<int>(modelHeight_)));
+    if (!resized.isContinuous())
     {
-        cv::Mat bgrU8;
-        bgr.convertTo(bgrU8, CV_8U);
-        bgr = bgrU8;
+        resized = resized.clone();
     }
 
-    if (bgr.cols != modelWidth_ || bgr.rows != modelHeight_)
-    {
-        throw std::runtime_error("Preprocess: input size mismatch, expected fixed model size");
-    }
-
-    cv::cvtColor(bgr, p.modelRgbU8, cv::COLOR_BGR2RGB);
+    p.inputTensor.resize(modelWidth_ * modelHeight_ * 3);
+    std::memcpy(p.inputTensor.data(), resized.data, p.inputTensor.size());
 }
 
 } // namespace RealesrganNodes
